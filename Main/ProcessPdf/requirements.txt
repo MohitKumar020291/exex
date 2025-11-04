@@ -1,0 +1,9 @@
+llama_index
+langchain-community
+langchain-core
+langchain_text_splitters
+torch
+transformers
+numpy
+ollama
+langchain_chroma
