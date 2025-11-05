@@ -11,8 +11,9 @@ import numpy as np
 from ollama import chat
 from ollama import ChatResponse
 
-from Main.models import DocumentSplitterLangChain
+from Main.models import DocumentSplitterLangChain, SplittedDocsType
 from Main.Embeddings.embedding import CustomEmbeddings
+from Main.ProcessPdf.helper import read_prompts
 
 
 async def get_documents_langchain(input_dir: str):
@@ -136,30 +137,7 @@ class EmbeddingSplitter:
         """
             The only problem I see here is what if the text is too long.
         """
-        system_prompt = """
-                You have been provided the raw text metadata, IDs, hashes, and repeated blocks.\n
-                I want to divide the page content into chunks of each question\n.
-                Your task is to\n
-                1. Remove any extra metadata not required from the question like\n:
-                "   Question Id, Question Type, Correct Marks, Question Label,\n"
-                "   Sub-Section, Max. Selectable Options, Group Comprehension Questions, Question Pattern Type.\n"
-                "   Also remove numeric prefixes like '6406532787170.' before text.\n"
-                "   Remove duplicates or repeated question blocks.\n\n"
-                2." Keep\n:"
-                "- The actual question statements and question number, options, and meaningful instructions.\n"
-                "- Examples:\n"
-                '   - "Based on the above data, answer the given subquestions."\n'
-                '   - "Select the valid adjacency representations of the tour."\n'
-                '   - Lists like "M, U, S, K, O, V, R, T, P, L, N, Q"\n\n'"
-                "- label each chunk with a chunk_number on that page"
-                3. Sometimes you may encounter that the question is not complete for a page - just leave that question there but mention INCOMPLETE in the end of that chunk.
-                "such as -\n"
-                "Question ...\n"
-                "chunk_number 2 (if this second question)"
-                "INCOMPLETE (if question is incomplete)"
-                "### OUTPUT FORMAT\n"
-                "Return only clean, human-readable text without markdown or commentary.\n"
-            """
+        system_prompt = read_prompts(file_name="llm_based_splitter.txt")
         llm_model_name: str = 'llama3:8b-instruct-q2_K'
         response: ChatResponse = chat(
             model=llm_model_name, 
@@ -188,84 +166,7 @@ class EmbeddingSplitter:
         return result_chunks
     
     def classify_chunk_relationship(self, text):
-        system_prompt = """
-You are a strict classifier that analyzes a text chunk from an exam question.
-
-Your task is to decide whether this chunk:
-1. Belongs with the previous chunk,
-2. Belongs with the next chunk,
-3. Is a complete question,
-4. Ends with options but not all options are visible (partial options),
-5. Contains a question following a previously completed question, or
-6. Should skip linking to previous if explicitly disallowed.
-
-We process **exactly one question at a time**. 
-If the text clearly includes a full question (identified by "Question Number", "Question Label", and a complete set of options), classify it as done.
-
-### Decision Logic
-- If the chunk starts mid-sentence, lacks a clear "Question Number" or "Question Label", or looks like a continuation of a previous chunk → return prev.
-- If the chunk ends abruptly, or options or the question text appear incomplete → return next.
-- If the chunk ends with options but not all options (A/B/C/D or numeric options) are present → return try_next_chunk_for_options.
-- If the chunk includes the full question (including all options), or includes multiple question blocks, return done.
-- If the chunk contains text of a new question immediately after a previously completed one → classify based on the new question and return done.
-
-### Notes
-- Treat each "Question Number" as a signal for a new question boundary.
-- If any question appears fully contained before another "Question Number" starts → return **done** for that question.
-- Do not overextend context beyond visible question text and options.
-- If the chunk includes “cannot_ask_previous = True” → never return prev.
-
-### Possible outputs (exactly one word, no italic and no bold):
-- prev
-- next
-- done
-- try_next_chunk_for_options
-        """
-
-        system_prompt = """
-You are a strict rule-based classifier. Output only one of:
-["prev", "next", "done", "try_next_chunk_for_options"]
-
-Use the following ordered decision tree to decide:
-
-{
-    "priority_order": [
-        "cannot_ask_previous = True",
-        "continuation_or_incomplete_question",
-        "partial_options",
-        "complete_question",
-        "new_question_after_completed"
-    ],
-    "rules": {
-        "cannot_ask_previous = True": {
-            "If the chunk ends abruptly, or options or the question text appear incomplete": "next",
-            "If the chunk ends with options but not all options (A/B/C/D or numeric options) are present": "try_next_chunk_for_options",
-            "If the chunk includes the full question (including all options), or includes multiple question blocks": "done",
-            "If the chunk contains text of a new question immediately after a previously completed one": "done"
-        },
-        "continuation_or_incomplete_question": {
-            "If the chunk starts mid-sentence, lacks a clear 'Question Number' or 'Question Label', or looks like a continuation of a previous chunk": "prev",
-            "If the chunk ends abruptly or options are incomplete": "next"
-        },
-        "partial_options": {
-            "If the chunk ends with options but not all options are present": "try_next_chunk_for_options"
-        },
-        "complete_question": {
-            "If the chunk includes the full question with all options": "done"
-        },
-        "new_question_after_completed": {
-            "If the chunk includes text of a new question after a completed one": "done"
-        }
-    }
-}
-
-
-Follow the order in `priority_order`. Once a condition matches, stop and output its value.
-
-Output format:
-"<one of: prev | next | done | try_next_chunk_for_options>"
-No explanations. No reasoning text.
-"""
+        system_prompt = read_prompts(file_name="classify_chunk_relationship_2.txt")
         print("\nText Received\n", text)
         # text = f"system prompt:\n{system_prompt}" + f"\nprompt:\n{text}"
         response = chat(model='llama3:8b-instruct-q4_0',
@@ -276,32 +177,7 @@ No explanations. No reasoning text.
         return response["message"]["content"]
     
     def clean_question_chunk(self, text):
-        system_prompt = \
-        """
-            "You are a text-cleaning model specialized in exam data.\n\n"
-            "Your task:\n"
-            "- Receive raw question text mixed with metadata, IDs, hashes, and repeated blocks and a previous question.\n"
-            "- Output only human-readable, non-technical question and option text.\n\n"
-            "### OUTPUT RULES\n"
-            "1. Keep:\n"
-            "- The actual question statements and question number, options, and meaningful instructions.\n"
-            "- Examples:\n"
-            '   - "Based on the above data, answer the given subquestions."\n'
-            '   - "Select the valid adjacency representations of the tour."\n'
-            '   - Lists like "M, U, S, K, O, V, R, T, P, L, N, Q"\n\n'
-            "2. Remove lines starting with:\n"
-            "   Question Id, Question Type, Correct Marks, Question Label,\n"
-            "   Sub-Section, Max. Selectable Options, Group Comprehension Questions, Question Pattern Type.\n"
-            "   Also remove numeric prefixes like '6406532787170.' before text.\n"
-            "   Remove duplicates or repeated question blocks.\n\n"
-            "3. Normalize:\n"
-            "- Collapse extra blank lines.\n"
-            "- Ensure options are separated by newlines.\n"
-            "- Preserve order.\n\n"
-            4. Strictly I don't want answer from you. If you don't find any question return - 'no question found', nothing extra no comments etc.
-            "### OUTPUT FORMAT\n"
-            "Return only clean, human-readable text without markdown or commentary.\n"
-        """
+        system_prompt = read_prompts(file_name="clean_question_chunk")
         response = chat(model='llama3:8b-instruct-q4_0',
                         messages=[{"role": "system", "content": system_prompt},
                                 {"role": "user", "content": text}])
@@ -310,15 +186,14 @@ No explanations. No reasoning text.
 def remove_hash(text):
     return "\n".join(text.split("\n")[:-1])
 
-def document_splitter(
+def split(
     documents: DocumentSplitterLangChain,
-    model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
-    split_type: str = 'embedding',
-    lookBackPower: int = 3,
-    subject: str = "AI",
-    pattern: str = r"Question"
-):
-    embedding_splitter = EmbeddingSplitter(model_name)
+    subject: str,
+    embedding_splitter: EmbeddingSplitter,
+    split_type: str,
+    lookBackPower: str,
+    pattern: str
+) -> SplittedDocsType:
     splitted_documents = dict()
     if split_type == "embedding":
         split_method = partial(embedding_splitter.embedding_based_splitting, lookBackPower=lookBackPower)
@@ -342,7 +217,14 @@ def document_splitter(
             splitted_documents[file_name].extend(splitted_document)
 
         assert len(splitted_documents[file_name]) == chunks_covered_pdf, "Total number of chunks are not equal to chunks covered pdf"
+    
+    return SplittedDocsType(splitted_documents=splitted_document)
 
+
+def clean_chunks(
+    splitted_documents: SplittedDocsType,
+    embedding_splitter
+):
     cleaned_documents = dict()
     for file_name, docs in splitted_documents.items():
         cleaned_documents[file_name] = []
@@ -395,6 +277,37 @@ def document_splitter(
             cleaned_question = embedding_splitter.clean_question_chunk(text=text)
             if not("no question found" in cleaned_question):
                 cleaned_documents[file_name].append(cleaned_question)
+    
+    return cleaned_question
+
+def document_splitter(
+    documents: DocumentSplitterLangChain,
+    model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+    split_type: str = 'embedding',
+    lookBackPower: int = 3,
+    subject: str = "AI",
+    pattern: str = r"Question"
+):
+
+    embedding_splitter = EmbeddingSplitter(model_name)
+
+    splitted_documents: SplittedDocsType = split(
+        documents=documents,
+        subject=subject,
+        split_type=split_type,
+        embedding_splitter=embedding_splitter,
+        lookBackPower=lookBackPower,
+        pattern=pattern
+    )
+
 
 
 def document_splitter_cs(chunk_size): ...
+
+
+def drop_noise(chunk_size = 512):
+    """
+        chunk_size: number of tokens
+    """
+    # create chunks on the basis of the chunk_size
+    ...
