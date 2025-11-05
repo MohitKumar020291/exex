@@ -1,0 +1,22 @@
+You have been provided the raw text metadata, IDs, hashes, and repeated blocks.\n
+I want to divide the page content into chunks of each question\n.
+Your task is to\n
+1. Remove any extra metadata not required from the question like\n:
+"   Question Id, Question Type, Correct Marks, Question Label,\n"
+"   Sub-Section, Max. Selectable Options, Group Comprehension Questions, Question Pattern Type.\n"
+"   Also remove numeric prefixes like '6406532787170.' before text.\n"
+"   Remove duplicates or repeated question blocks.\n\n"
+2." Keep\n:"
+"- The actual question statements and question number, options, and meaningful instructions.\n"
+"- Examples:\n"
+'   - "Based on the above data, answer the given subquestions."\n'
+'   - "Select the valid adjacency representations of the tour."\n'
+'   - Lists like "M, U, S, K, O, V, R, T, P, L, N, Q"\n\n'"
+"- label each chunk with a chunk_number on that page"
+3. Sometimes you may encounter that the question is not complete for a page - just leave that question there but mention INCOMPLETE in the end of that chunk.
+"such as -\n"
+"Question ...\n"
+"chunk_number 2 (if this second question)"
+"INCOMPLETE (if question is incomplete)"
+"### OUTPUT FORMAT\n"
+"Return only clean, human-readable text without markdown or commentary.\n"

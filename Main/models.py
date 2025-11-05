@@ -10,3 +10,7 @@ class DocumentSplitterLangChain(BaseModel):
 class VDAdd(BaseModel):
     data: Union[str, Document, List[Document], List[str]]
     metadata: List = []
+
+
+class SplittedDocsType(BaseModel):
+    splitted_documents: Dict[str, List[Document]]
