@@ -189,43 +189,90 @@ class EmbeddingSplitter:
     
     def classify_chunk_relationship(self, text):
         system_prompt = """
-            You are a strict classifier that analyzes a text chunk from an exam question.
+You are a strict classifier that analyzes a text chunk from an exam question.
 
-            Your task is to decide whether this chunk:
-            1. Belongs with the previous chunk,
-            2. Belongs with the next chunk,
-            3. Is a complete question,
-            4. Ends with options but not all options are visible (partial options),
-            5. Contains a question following a previously completed question, or
-            6. Should skip linking to previous if explicitly disallowed.
+Your task is to decide whether this chunk:
+1. Belongs with the previous chunk,
+2. Belongs with the next chunk,
+3. Is a complete question,
+4. Ends with options but not all options are visible (partial options),
+5. Contains a question following a previously completed question, or
+6. Should skip linking to previous if explicitly disallowed.
 
-            We process **exactly one question at a time**. 
-            If the text clearly includes a full question (identified by "Question Number", "Question Label", and a complete set of options), classify it as **done**.
+We process **exactly one question at a time**. 
+If the text clearly includes a full question (identified by "Question Number", "Question Label", and a complete set of options), classify it as done.
 
-            ### Decision Logic
-            - If the chunk starts mid-sentence, lacks a clear "Question Number" or "Question Label", or looks like a continuation of a previous chunk → return **prev**.
-            - If the chunk ends abruptly, or options or the question text appear incomplete → return **next**.
-            - If the chunk ends with options but not all options (A/B/C/D or numeric options) are present → return **try_next_chunk_for_options**.
-            - If the chunk includes the full question (including all options), or includes multiple question blocks, return **done**.
-            - If the chunk includes “cannot_ask_previous = True” → never return **prev**.
-            - If the chunk contains text of a new question immediately after a previously completed one → classify based on the new question and return **done**.
+### Decision Logic
+- If the chunk starts mid-sentence, lacks a clear "Question Number" or "Question Label", or looks like a continuation of a previous chunk → return prev.
+- If the chunk ends abruptly, or options or the question text appear incomplete → return next.
+- If the chunk ends with options but not all options (A/B/C/D or numeric options) are present → return try_next_chunk_for_options.
+- If the chunk includes the full question (including all options), or includes multiple question blocks, return done.
+- If the chunk contains text of a new question immediately after a previously completed one → classify based on the new question and return done.
 
-            ### Notes
-            - Treat each "Question Number" as a signal for a new question boundary.
-            - If any question appears fully contained before another "Question Number" starts → return **done** for that question.
-            - Do not overextend context beyond visible question text and options.
+### Notes
+- Treat each "Question Number" as a signal for a new question boundary.
+- If any question appears fully contained before another "Question Number" starts → return **done** for that question.
+- Do not overextend context beyond visible question text and options.
+- If the chunk includes “cannot_ask_previous = True” → never return prev.
 
-            ### Possible outputs (exactly one word):
-            - prev
-            - next
-            - done
-            - try_next_chunk_for_options
+### Possible outputs (exactly one word, no italic and no bold):
+- prev
+- next
+- done
+- try_next_chunk_for_options
         """
 
+        system_prompt = """
+You are a strict rule-based classifier. Output only one of:
+["prev", "next", "done", "try_next_chunk_for_options"]
+
+Use the following ordered decision tree to decide:
+
+{
+    "priority_order": [
+        "cannot_ask_previous = True",
+        "continuation_or_incomplete_question",
+        "partial_options",
+        "complete_question",
+        "new_question_after_completed"
+    ],
+    "rules": {
+        "cannot_ask_previous = True": {
+            "If the chunk ends abruptly, or options or the question text appear incomplete": "next",
+            "If the chunk ends with options but not all options (A/B/C/D or numeric options) are present": "try_next_chunk_for_options",
+            "If the chunk includes the full question (including all options), or includes multiple question blocks": "done",
+            "If the chunk contains text of a new question immediately after a previously completed one": "done"
+        },
+        "continuation_or_incomplete_question": {
+            "If the chunk starts mid-sentence, lacks a clear 'Question Number' or 'Question Label', or looks like a continuation of a previous chunk": "prev",
+            "If the chunk ends abruptly or options are incomplete": "next"
+        },
+        "partial_options": {
+            "If the chunk ends with options but not all options are present": "try_next_chunk_for_options"
+        },
+        "complete_question": {
+            "If the chunk includes the full question with all options": "done"
+        },
+        "new_question_after_completed": {
+            "If the chunk includes text of a new question after a completed one": "done"
+        }
+    }
+}
+
+
+Follow the order in `priority_order`. Once a condition matches, stop and output its value.
+
+Output format:
+"<one of: prev | next | done | try_next_chunk_for_options>"
+No explanations. No reasoning text.
+"""
         print("\nText Received\n", text)
+        # text = f"system prompt:\n{system_prompt}" + f"\nprompt:\n{text}"
         response = chat(model='llama3:8b-instruct-q4_0',
-                        messages=[{"role": "system", "content": system_prompt},
-                                {"role": "user", "content": text}])
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": text}
+                            ])
         return response["message"]["content"]
     
     def clean_question_chunk(self, text):
@@ -301,27 +348,25 @@ def document_splitter(
         cleaned_documents[file_name] = []
         num_docs = len(docs)
         upper_range = 0
-        new_chunk_num = -1
         for idx, doc in enumerate(docs):
-            print(idx, upper_range)
-            input()
+            print("\n", idx, upper_range)
+            input("Press Enter")
             if idx < upper_range:
                 continue
             print(f"\ndoc {idx}\n", remove_hash(doc.page_content))
 
-            new_chunk_num += 1
-            response = None
+            response = "None"
             prev_question = cleaned_documents[file_name][-1] if len(cleaned_documents[file_name]) > 0 else "No previous question yet"
             text = f"\ntext:\n{remove_hash(doc.page_content)}"
             cannot_ask_previous = True if idx == 0 else False
             current_idx = idx
 
-            while response != "done":
+            while response.strip() != "done":
                 if cannot_ask_previous:
-                    send_text: str = f"cannot_ask_previous = True\n, previous question:\n{prev_question}\n" + text
+                    send_text: str = f"cannot_ask_previous = True\nprevious question:\n{prev_question}\n" + text
                 else:
                     send_text: str = f"previous question:\n{prev_question}\n" + text
-                send_text = send_text.replace("\n", " ")
+                # send_text = send_text.replace("\n", " ")
                 response = embedding_splitter.classify_chunk_relationship(text=send_text)
                 if response == "prev":
                     current_idx = max(current_idx-1, 0)
@@ -336,11 +381,15 @@ def document_splitter(
                     print("next", f"upper_range: {upper_range}", f"doc idx: {idx}")
                 elif response == "try_next_chunk_for_options":
                     text = text + f"\n{remove_hash(docs[idx+1].page_content)}"
+                    print("try_next_chunk_for_options")
+                elif response == "done":
+                    print("done", f"current_idx: {current_idx}", f"doc idx: {idx}")
                 else:
-                    print("done")
+                    print(response)
+                    print("No condition met")
 
                 print(f"\nTextD:\n{text}\n")
-                input()
+                input("Press Enter")
             upper_range += 1
 
             cleaned_question = embedding_splitter.clean_question_chunk(text=text)
