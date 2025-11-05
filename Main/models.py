@@ -12,5 +12,6 @@ class VDAdd(BaseModel):
     metadata: List = []
 
 
-class SplittedDocsType(BaseModel):
-    splitted_documents: Dict[str, List[Document]]
+if __name__ == "__main__":
+
+    ...
