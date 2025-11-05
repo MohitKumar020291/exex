@@ -7,3 +7,5 @@ transformers
 numpy
 ollama
 langchain_chroma
+langchain_text_splitters
+sentence-transformers

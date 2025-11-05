@@ -3,20 +3,22 @@ import subprocess
 import hashlib, base64
 import re
 from functools import partial
+from typing import List
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document
+from langchain_text_splitters.sentence_transformers import SentenceTransformersTokenTextSplitter
 import torch
 import numpy as np
 from ollama import chat
 from ollama import ChatResponse
 
-from Main.models import DocumentSplitterLangChain, SplittedDocsType
+from Main.models import DocumentSplitterLangChain
 from Main.Embeddings.embedding import CustomEmbeddings
 from Main.ProcessPdf.helper import read_prompts
 
 
-async def get_documents_langchain(input_dir: str):
+async def get_documents_langchain(input_dir: str) -> DocumentSplitterLangChain:
     os.path.exists(input_dir)
     input_dir_pdfs = subprocess.run(
                         ['find', input_dir, '-type', 'f', '-name', '*.pdf'], 
@@ -30,7 +32,7 @@ async def get_documents_langchain(input_dir: str):
             documents_idx.append(page)
         documents[file_pdf_path] = documents_idx
 
-    return documents
+    return DocumentSplitterLangChain(documents=documents)
 
 
 class EmbeddingSplitter:
@@ -193,7 +195,8 @@ def split(
     split_type: str,
     lookBackPower: str,
     pattern: str
-) -> SplittedDocsType:
+) -> DocumentSplitterLangChain:
+    documents = documents.documents
     splitted_documents = dict()
     if split_type == "embedding":
         split_method = partial(embedding_splitter.embedding_based_splitting, lookBackPower=lookBackPower)
@@ -218,13 +221,14 @@ def split(
 
         assert len(splitted_documents[file_name]) == chunks_covered_pdf, "Total number of chunks are not equal to chunks covered pdf"
     
-    return SplittedDocsType(splitted_documents=splitted_document)
+    return DocumentSplitterLangChain(splitted_documents=splitted_document)
 
 
 def clean_chunks(
-    splitted_documents: SplittedDocsType,
+    splitted_documents: DocumentSplitterLangChain,
     embedding_splitter
-):
+) -> DocumentSplitterLangChain:
+    splitted_documents = splitted_documents.documents
     cleaned_documents = dict()
     for file_name, docs in splitted_documents.items():
         cleaned_documents[file_name] = []
@@ -278,7 +282,8 @@ def clean_chunks(
             if not("no question found" in cleaned_question):
                 cleaned_documents[file_name].append(cleaned_question)
     
-    return cleaned_question
+    return DocumentSplitterLangChain(documents=cleaned_question)
+
 
 def document_splitter(
     documents: DocumentSplitterLangChain,
@@ -288,10 +293,10 @@ def document_splitter(
     subject: str = "AI",
     pattern: str = r"Question"
 ):
-
+    documents = documents.documents # <-- pydant prob.
     embedding_splitter = EmbeddingSplitter(model_name)
 
-    splitted_documents: SplittedDocsType = split(
+    splitted_documents: DocumentSplitterLangChain = split(
         documents=documents,
         subject=subject,
         split_type=split_type,
@@ -301,13 +306,34 @@ def document_splitter(
     )
 
 
+    cleaned_questions = clean_chunks(
+            splitted_documents=splitted_documents, 
+            embedding_splitter=embedding_splitter
+        )
+    
+    return cleaned_questions
 
-def document_splitter_cs(chunk_size): ...
+
+def document_splitter_token(
+    chunk_overlap: int,
+    model_name: str,
+    tokens_per_chunk: int,
+    documents: DocumentSplitterLangChain
+) -> DocumentSplitterLangChain:
+    documents = documents.documents.copy() # <-- pydant problem - should be a better way of typing
+    splitter = SentenceTransformersTokenTextSplitter(
+        chunk_overlap=chunk_overlap ,
+        model_name=model_name,
+        tokens_per_chunk=tokens_per_chunk
+    )
+    for file_name, docs in documents.items():
+        try:
+            splitted_docs = splitter.transform_documents(docs)
+        except Exception as e:
+            raise Exception(e)
+        documents[file_name] = splitted_docs
+
+    return DocumentSplitterLangChain(documents=documents)
 
 
-def drop_noise(chunk_size = 512):
-    """
-        chunk_size: number of tokens
-    """
-    # create chunks on the basis of the chunk_size
-    ...
+def clean_docs(documents: DocumentSplitterLangChain): ...
