@@ -7,7 +7,8 @@ import unittest
 from Main.ProcessPdf.load_pdf import (
                                     get_documents_langchain, 
                                     document_splitter,
-                                    document_splitter_tokens
+                                    document_splitter_tokens,
+                                    clean_docs
                                     )
 from Main.models import DocumentSplitterLangChain
 
@@ -49,6 +50,15 @@ class TestProcessPdf(unittest.IsolatedAsyncioTestCase):
         for _, docs in splitted_docs.documents.items():
             for doc in docs:
                 print(f"\n{doc.page_content}")
+
+    def test_clean_docs(self):
+        splitted_docs: DocumentSplitterLangChain = document_splitter_tokens(
+            chunk_overlap=50,
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            tokens_per_chunk=256, # <-- this is model's limit
+            documents=self.documents
+        )
+        clean_docs(documents=splitted_docs)
 
 
 if __name__ == "__main__":

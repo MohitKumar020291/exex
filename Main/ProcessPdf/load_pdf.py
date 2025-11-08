@@ -355,18 +355,25 @@ def document_splitter_tokens(
 
     return DocumentSplitterLangChain(documents=documents)
 
-
 def clean_docs(
     documents: DocumentSplitterLangChain
 ):
     documents = documents.documents
     llm_model_name = "llama3:8b-instruct-q4_0"
-    system_prompt = read_prompts()
-    for _, doc in documents:
-        response: ChatResponse = chat(
-            model=llm_model_name, 
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text},
-        ])
+    system_prompt = read_prompts(file_name="clean_question_chunk")
+    for _, docs in documents.items():
+        for doc in docs:
+            text = doc.page_content
+            response: ChatResponse = chat(
+                model=llm_model_name, 
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text},
+            ])
+            print("TEXT\n", text)
+            print("CLEANED QUESTION\n", response["message"]["content"])
+            print("=" * 10)
+        break
 
+def insert_images():
+    ...
