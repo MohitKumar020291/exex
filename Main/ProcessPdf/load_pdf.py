@@ -3,7 +3,7 @@ import subprocess
 import hashlib, base64
 import re
 from functools import partial
-from typing import List
+from typing import Dict
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document
@@ -284,6 +284,14 @@ def clean_chunks(
     
     return DocumentSplitterLangChain(documents=cleaned_question)
 
+def remove_extra_sub(
+    documents: Dict,
+    subject: str = "AI",
+):
+    for file_name, docs in documents.items():
+        docs[0].page_content = re.split(pattern=subject, string=docs[0].page_content)[-1]
+        documents[file_name] = docs
+    return documents
 
 def document_splitter(
     documents: DocumentSplitterLangChain,
@@ -313,14 +321,26 @@ def document_splitter(
     
     return cleaned_questions
 
+def merge_docs(documents: DocumentSplitterLangChain) -> DocumentSplitterLangChain:
+    merged_docs = {}
+    for file_name, docs in documents.documents.items():
+        merged_text = "\n".join(doc.page_content for doc in docs)
+        merged_docs[file_name] = [Document(page_content=merged_text)]
+    return DocumentSplitterLangChain(documents=merged_docs)
 
-def document_splitter_token(
+def document_splitter_tokens(
     chunk_overlap: int,
     model_name: str,
     tokens_per_chunk: int,
-    documents: DocumentSplitterLangChain
+    documents: DocumentSplitterLangChain,
+    subject: str = "AI"
 ) -> DocumentSplitterLangChain:
     documents = documents.documents.copy() # <-- pydant problem - should be a better way of typing
+    documents = remove_extra_sub(documents=documents, subject=subject)
+
+    # merge docs - so that can utilize the full tokenization limit
+    documents = merge_docs(DocumentSplitterLangChain(documents=documents)).documents
+
     splitter = SentenceTransformersTokenTextSplitter(
         chunk_overlap=chunk_overlap ,
         model_name=model_name,
@@ -336,4 +356,17 @@ def document_splitter_token(
     return DocumentSplitterLangChain(documents=documents)
 
 
-def clean_docs(documents: DocumentSplitterLangChain): ...
+def clean_docs(
+    documents: DocumentSplitterLangChain
+):
+    documents = documents.documents
+    llm_model_name = "llama3:8b-instruct-q4_0"
+    system_prompt = read_prompts()
+    for _, doc in documents:
+        response: ChatResponse = chat(
+            model=llm_model_name, 
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+        ])
+

@@ -4,13 +4,10 @@
 import os
 import unittest
 
-from transformers import AutoTokenizer
-
-
 from Main.ProcessPdf.load_pdf import (
                                     get_documents_langchain, 
                                     document_splitter,
-                                    document_splitter_token
+                                    document_splitter_tokens
                                     )
 from Main.models import DocumentSplitterLangChain
 
@@ -39,15 +36,19 @@ class TestProcessPdf(unittest.IsolatedAsyncioTestCase):
         print(self.splitted_document)
 
     def test_splitting_tokens(self):
-        splitted_docs: DocumentSplitterLangChain = document_splitter_token(
-            chunk_overlap=5,
+        splitted_docs: DocumentSplitterLangChain = document_splitter_tokens(
+            chunk_overlap=50,
             model_name="sentence-transformers/all-MiniLM-L6-v2",
-            tokens_per_chunk=20, # <-- limit of model_name model
+            tokens_per_chunk=256, # <-- this is model's limit
             documents=self.documents
         )
         old_docs_len = len(self.documents.documents[self.file_names[0]])
         new_docs_len = len(splitted_docs.documents[self.file_names[0]])
         self.assertGreaterEqual(new_docs_len, old_docs_len)
+
+        for _, docs in splitted_docs.documents.items():
+            for doc in docs:
+                print(f"\n{doc.page_content}")
 
 
 if __name__ == "__main__":
