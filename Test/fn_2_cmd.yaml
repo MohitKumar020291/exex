@@ -1,0 +1,3 @@
+test_clean_docs: python3 -m unittest Test.ProcessPdf.test_1_pdf_loader.TestProcessPdf.test_clean_docs
+test_get_hf_auth_token: python3 -m unittest Test.ProcessPdf.test_1_pdf_loader.TestProcessPdf.test_get_hf_auth_token
+test_get_hf_tokenizer: python3 -m unittest Test.ProcessPdf.test_1_pdf_loader.TestProcessPdf.test_get_hf_tokenizer

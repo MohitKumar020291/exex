@@ -9,5 +9,6 @@ if [ $# -eq 0 ]; then
 fi
 
 for arg in "$@"; do
-    python -m unittest "$arg"
+    cmd=$(yq -r .$arg Test/fn_2_cmd.yaml)
+    $cmd
 done
