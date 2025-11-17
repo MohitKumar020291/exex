@@ -2,6 +2,7 @@
 "Your task:\n"
 "- Receive raw question text mixed with metadata, IDs, hashes, and repeated blocks and a previous question.\n"
 "- Output only human-readable, non-technical question and option text.\n\n"
+"- If there are multiple Questions then put a splitter between them like <SPLITTER>"
 "### OUTPUT RULES\n"
 "1. Keep:\n"
 "- The actual question statements and question number, options, and meaningful instructions.\n"

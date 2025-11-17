@@ -5,10 +5,10 @@ import os
 import unittest
 
 from Main.ProcessPdf.load_pdf import (
-                                    get_documents_langchain, 
+                                    get_documents_langchain,
                                     document_splitter,
-                                    document_splitter_tokens,
-                                    clean_docs
+                                    EmbeddingSplitter,
+                                    Clean
                                     )
 from Main.models import DocumentSplitterLangChain
 
@@ -23,7 +23,7 @@ class TestProcessPdf(unittest.IsolatedAsyncioTestCase):
         self.model_name = "sentence-transformers/all-MiniLM-L6-v2"
     
     async def test_embedding_splitter(self):
-        self.splitted_documents = document_splitter(documents=self.documents, model_name=self.model_name)
+        self.splitted_documents = document_splitter(documents=self.documents, sentence_embed_model_name=self.model_name)
         file_name_1 = self.file_names[0]
         self.assertGreater(len(self.splitted_documents[file_name_1]), len(self.documents[file_name_1]),\
                         "The documents are not splitted further")
@@ -33,15 +33,14 @@ class TestProcessPdf(unittest.IsolatedAsyncioTestCase):
             print("\n", doc.page_content)
     
     async def test_llm_splitter(self):
-        self.splitted_documents = document_splitter(documents=self.documents, model_name=self.model_name, split_type="llm")
+        self.splitted_documents = document_splitter(documents=self.documents, sentence_embed_model_name=self.model_name, split_type="llm")
         print(self.splitted_document)
 
     def test_splitting_tokens(self):
-        splitted_docs: DocumentSplitterLangChain = document_splitter_tokens(
-            chunk_overlap=50,
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            tokens_per_chunk=256, # <-- this is model's limit
-            documents=self.documents
+        # I am not happy with the current settings
+        splitted_docs: DocumentSplitterLangChain = document_splitter(
+            documents=self.documents,
+            split_type="token"
         )
         old_docs_len = len(self.documents.documents[self.file_names[0]])
         new_docs_len = len(splitted_docs.documents[self.file_names[0]])
@@ -52,13 +51,15 @@ class TestProcessPdf(unittest.IsolatedAsyncioTestCase):
                 print(f"\n{doc.page_content}")
 
     def test_clean_docs(self):
-        splitted_docs: DocumentSplitterLangChain = document_splitter_tokens(
-            chunk_overlap=50,
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            tokens_per_chunk=256, # <-- this is model's limit
-            documents=self.documents
+        print(type(self.documents))
+        splitted_docs: DocumentSplitterLangChain = document_splitter(
+            documents=self.documents,
+            split_type="token"
         )
-        clean_docs(documents=splitted_docs)
+        cleaned_docs: DocumentSplitterLangChain = Clean.clean_docs(documents=splitted_docs)
+        for _, docs in cleaned_docs.documents.items():
+            for doc in docs:
+                print(doc)
 
 
 if __name__ == "__main__":

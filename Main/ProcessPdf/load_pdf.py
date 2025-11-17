@@ -4,18 +4,24 @@ import hashlib, base64
 import re
 from functools import partial
 from typing import Dict
+from pathlib import Path
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document
 from langchain_text_splitters.sentence_transformers import SentenceTransformersTokenTextSplitter
 import torch
 import numpy as np
-from ollama import chat
-from ollama import ChatResponse
+from ollama import chat, ChatResponse
 
 from Main.models import DocumentSplitterLangChain
 from Main.Embeddings.embedding import CustomEmbeddings
-from Main.ProcessPdf.helper import read_prompts
+from Main.ProcessPdf.helper import (
+                                read_prompts, 
+                                classify_chunk_relationship, 
+                                clean_question_chunk,
+                                merge_docs,
+                                get_hf_tokenizer
+                                )
 
 
 async def get_documents_langchain(input_dir: str) -> DocumentSplitterLangChain:
@@ -147,9 +153,41 @@ class EmbeddingSplitter:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text},
             ])
-        
-        print(response["message"]["content"])
+
         return response["message"]["content"], None
+    
+    def token_based_splitter(
+        self,
+        chunk_overlap: int,
+        model_name: str,
+        tokens_per_chunk: int,
+        documents: DocumentSplitterLangChain,
+        subject: str = "AI",
+        **kwargs
+    ) -> DocumentSplitterLangChain:
+        # I don't need metadata = {"source": "file_name"}
+        documents = documents.documents.copy() # <-- pydant problem - should be a better way of typing
+        for file_name, docs in documents.items():
+            docs[0].page_content = re.split(pattern=subject, string=docs[0].page_content)[-1]
+            documents[file_name] = docs
+        # merge docs - so that can utilize the full tokenization limit
+        documents = merge_docs(DocumentSplitterLangChain(documents=documents)).documents
+
+        # splitting on the basis of the token length
+        splitter = SentenceTransformersTokenTextSplitter(
+            chunk_overlap=chunk_overlap ,
+            model_name=model_name,
+            tokens_per_chunk=tokens_per_chunk
+        )
+
+        for file_name, docs in documents.items():
+            try:
+                splitted_docs = splitter.transform_documents(docs)
+            except Exception as e:
+                raise Exception(e)
+            documents[file_name] = splitted_docs
+
+        return DocumentSplitterLangChain(documents=documents)
 
     def _resolve_boundaries(self, lines, boundaries, metadata_document, chunks_covered_pdf):
         result_chunks = []
@@ -166,24 +204,131 @@ class EmbeddingSplitter:
             )
 
         return result_chunks
+
+model_2_context_length = {
+            "meta-llama/Meta-Llama-3-8B-Instruct": 8192
+        }
+
+class Clean:
+    def __init__(self):
+        ...
+
+    @staticmethod
+    def clean_chunks(
+        splitted_documents: DocumentSplitterLangChain
+    ) -> DocumentSplitterLangChain:
+        r"""
+            Definition:
+                splitted docs of a file are combined if required (defined below).
+                required: if we need some prev doc for a doc we ask for the prev doc, sometimes
+                we may require next doc, and something like.
+                How do we decide we need any other chunk/doc? Ahh... we passes current text to the LLM
+                and there is system prompt in "Main/prompts/classify_chunk_relationship_2.txt" which helps
+                the LLM to decide whether we need any other chunk or we have the full question.
+                then we are using a model (right now llama3:8b-instruct-q4_0).
+                When we have the full question, we might want to remove the metadata about the question,
+                this is done by the EmbeddingSpliiter.clean_question_chunk, see above.
+            Args:
+                splitted_documents: These are splitted documents (right now on the basis of the tokens).
+            Usefulness:
+                No (read limitations)
+            Limitations:
+                Models sucks (dilution, context length), needs more configuration and over
+                engineered when compared to the normal cleaning of the text (formed through some different method).
+        """
+        splitted_documents = splitted_documents.documents
+        cleaned_documents = dict()
+        for file_name, docs in splitted_documents.items():
+            cleaned_documents[file_name] = []
+            num_docs = len(docs)
+            upper_range = 0
+            for idx, doc in enumerate(docs):
+                if idx < upper_range:
+                    continue
+                print(f"\ndoc {idx}\n", remove_hash(doc.page_content))
+
+                response = "None"
+                prev_question = cleaned_documents[file_name][-1] if len(cleaned_documents[file_name]) > 0 else "No previous question yet"
+                text = f"\ntext:\n{remove_hash(doc.page_content)}"
+                cannot_ask_previous = True if idx == 0 else False
+                current_idx = idx
+
+                while response.strip() != "done":
+                    if cannot_ask_previous:
+                        send_text: str = f"cannot_ask_previous = True\nprevious question:\n{prev_question}\n" + text
+                    else:
+                        send_text: str = f"previous question:\n{prev_question}\n" + text
+                    # send_text = send_text.replace("\n", " ")
+                    response = classify_chunk_relationship(text=send_text)
+                    if response == "prev":
+                        current_idx = max(current_idx-1, 0)
+                        print("prev", f"current_idx: {current_idx}", f"doc idx: {idx}")
+                        if current_idx == 0:
+                            cannot_ask_previous = True
+                        else:
+                            text =  f"{remove_hash(docs[upper_range].page_content)}\n" + text
+                    elif response == "next":
+                        upper_range = min(upper_range+1, num_docs)
+                        text = text + f"\n{remove_hash(docs[upper_range].page_content)}"
+                    elif response == "try_next_chunk_for_options":
+                        text = text + f"\n{remove_hash(docs[idx+1].page_content)}"
+                    elif response == "done":
+                        print("done", f"current_idx: {current_idx}", f"doc idx: {idx}")
+                    else:
+                        print(response)
+
+                upper_range += 1
+
+                cleaned_question = clean_question_chunk(text=text)
+                if not("no question found" in cleaned_question):
+                    cleaned_documents[file_name].append(cleaned_question)
+        
+        return DocumentSplitterLangChain(documents=cleaned_question)
     
-    def classify_chunk_relationship(self, text):
-        system_prompt = read_prompts(file_name="classify_chunk_relationship_2.txt")
-        print("\nText Received\n", text)
-        # text = f"system prompt:\n{system_prompt}" + f"\nprompt:\n{text}"
-        response = chat(model='llama3:8b-instruct-q4_0',
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": text}
-                            ])
-        return response["message"]["content"]
-    
-    def clean_question_chunk(self, text):
+    @staticmethod
+    def clean_docs(
+        documents: DocumentSplitterLangChain
+    ) -> DocumentSplitterLangChain:
+        """
+            This function is calling model everytime for a doc.
+            Which is slow according to me.
+        """
+        tokenizer_model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
+        llm_model_name = "llama3:8b-instruct-q4_0"
+        context_length = model_2_context_length.get(tokenizer_model_name)
+        leave_apart = 500 #changes according to models
+        tokenizer = get_hf_tokenizer(model_name=tokenizer_model_name)
+        documents = documents.documents
         system_prompt = read_prompts(file_name="clean_question_chunk")
-        response = chat(model='llama3:8b-instruct-q4_0',
-                        messages=[{"role": "system", "content": system_prompt},
-                                {"role": "user", "content": text}])
-        return response.get("message", {}).get("content", "").strip()
+        system_prompt_tokens = tokenizer(system_prompt)["input_ids"]
+        max_model_limit = context_length - len(system_prompt_tokens) - leave_apart
+        PromptDominanceThreshold = 10
+        prompt_dilution_limit = len(system_prompt_tokens) * PromptDominanceThreshold
+
+
+        clean_docs = dict()
+        for file_name, docs in documents.items():
+            clean_docs[file_name] = []
+            text = ""
+            for idx, doc in enumerate(docs):
+                text_input = text + "\n" + doc.page_content if text != "" else doc.page_content
+                tokenized_text = tokenizer(text_input) #testing
+                if len(tokenized_text["input_ids"]) <= max_model_limit \
+                    and idx != len(docs) - 1 \
+                    and len(tokenized_text["input_ids"]) <= prompt_dilution_limit:
+                    text = text + "\n" + doc.page_content #updating
+                else:
+                    response: str = clean_question_chunk(
+                                        text=text, 
+                                        system_prompt=system_prompt,
+                                        model_name=llm_model_name
+                                    )
+                    doc.page_content = response
+                    clean_docs[file_name].append(doc)
+                    text = ""
+
+        return DocumentSplitterLangChain(documents=clean_docs)
+
 
 def remove_hash(text):
     return "\n".join(text.split("\n")[:-1])
@@ -194,7 +339,8 @@ def split(
     embedding_splitter: EmbeddingSplitter,
     split_type: str,
     lookBackPower: str,
-    pattern: str
+    pattern: str,
+    **kwargs
 ) -> DocumentSplitterLangChain:
     documents = documents.documents
     splitted_documents = dict()
@@ -204,6 +350,24 @@ def split(
         split_method = partial(embedding_splitter.regex_based_splitting, subject=subject, pattern=pattern)
     elif split_type == "llm":
         split_method = partial(embedding_splitter.llm_based_splitter)
+    elif split_type == "token":
+        chunk_overlap = kwargs.get("chunk_overlap", None)
+        if chunk_overlap == None:
+            raise ValueError("chunk_overlap could not be None")
+        model_name = kwargs.get("model_name", None)
+        if model_name == None:
+            raise ValueError("model_name could not be None")
+        tokens_per_chunk = kwargs.get("tokens_per_chunk", None)
+        if tokens_per_chunk == None:
+            raise ValueError("tokens_per_chunk could not be None")
+        split_method = partial(
+                            embedding_splitter.token_based_splitter,
+                            chunk_overlap=chunk_overlap,
+                            model_name=model_name,
+                            tokens_per_chunk=tokens_per_chunk
+                        )
+        splitted_documents: DocumentSplitterLangChain = split_method(documents=DocumentSplitterLangChain(documents=documents))
+        return splitted_documents
 
     for file_name, list_docs in documents.items():
         splitted_documents[file_name] = list()
@@ -221,88 +385,26 @@ def split(
 
         assert len(splitted_documents[file_name]) == chunks_covered_pdf, "Total number of chunks are not equal to chunks covered pdf"
     
-    return DocumentSplitterLangChain(splitted_documents=splitted_document)
+    return DocumentSplitterLangChain(documents=splitted_document)
 
-
-def clean_chunks(
-    splitted_documents: DocumentSplitterLangChain,
-    embedding_splitter
-) -> DocumentSplitterLangChain:
-    splitted_documents = splitted_documents.documents
-    cleaned_documents = dict()
-    for file_name, docs in splitted_documents.items():
-        cleaned_documents[file_name] = []
-        num_docs = len(docs)
-        upper_range = 0
-        for idx, doc in enumerate(docs):
-            print("\n", idx, upper_range)
-            input("Press Enter")
-            if idx < upper_range:
-                continue
-            print(f"\ndoc {idx}\n", remove_hash(doc.page_content))
-
-            response = "None"
-            prev_question = cleaned_documents[file_name][-1] if len(cleaned_documents[file_name]) > 0 else "No previous question yet"
-            text = f"\ntext:\n{remove_hash(doc.page_content)}"
-            cannot_ask_previous = True if idx == 0 else False
-            current_idx = idx
-
-            while response.strip() != "done":
-                if cannot_ask_previous:
-                    send_text: str = f"cannot_ask_previous = True\nprevious question:\n{prev_question}\n" + text
-                else:
-                    send_text: str = f"previous question:\n{prev_question}\n" + text
-                # send_text = send_text.replace("\n", " ")
-                response = embedding_splitter.classify_chunk_relationship(text=send_text)
-                if response == "prev":
-                    current_idx = max(current_idx-1, 0)
-                    print("prev", f"current_idx: {current_idx}", f"doc idx: {idx}")
-                    if current_idx == 0:
-                        cannot_ask_previous = True
-                    else:
-                        text =  f"{remove_hash(docs[upper_range].page_content)}\n" + text
-                elif response == "next":
-                    upper_range = min(upper_range+1, num_docs)
-                    text = text + f"\n{remove_hash(docs[upper_range].page_content)}"
-                    print("next", f"upper_range: {upper_range}", f"doc idx: {idx}")
-                elif response == "try_next_chunk_for_options":
-                    text = text + f"\n{remove_hash(docs[idx+1].page_content)}"
-                    print("try_next_chunk_for_options")
-                elif response == "done":
-                    print("done", f"current_idx: {current_idx}", f"doc idx: {idx}")
-                else:
-                    print(response)
-                    print("No condition met")
-
-                print(f"\nTextD:\n{text}\n")
-                input("Press Enter")
-            upper_range += 1
-
-            cleaned_question = embedding_splitter.clean_question_chunk(text=text)
-            if not("no question found" in cleaned_question):
-                cleaned_documents[file_name].append(cleaned_question)
-    
-    return DocumentSplitterLangChain(documents=cleaned_question)
-
-def remove_extra_sub(
-    documents: Dict,
-    subject: str = "AI",
-):
-    for file_name, docs in documents.items():
-        docs[0].page_content = re.split(pattern=subject, string=docs[0].page_content)[-1]
-        documents[file_name] = docs
-    return documents
-
+# this is a run kinda function
+# better to be part of the pipeline
 def document_splitter(
     documents: DocumentSplitterLangChain,
-    model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+    sentence_embed_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
     split_type: str = 'embedding',
     lookBackPower: int = 3,
     subject: str = "AI",
-    pattern: str = r"Question"
+    pattern: str = r"Question",
+    **kwargs
 ):
-    documents = documents.documents # <-- pydant prob.
-    embedding_splitter = EmbeddingSplitter(model_name)
+    embedding_splitter = EmbeddingSplitter(sentence_embed_model_name)
+
+    token_based_splitter_args = {
+        "chunk_overlap": 50,
+        "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+        "tokens_per_chunk": 256
+    }
 
     splitted_documents: DocumentSplitterLangChain = split(
         documents=documents,
@@ -310,70 +412,12 @@ def document_splitter(
         split_type=split_type,
         embedding_splitter=embedding_splitter,
         lookBackPower=lookBackPower,
-        pattern=pattern
+        pattern=pattern,
+        **token_based_splitter_args
     )
 
-
-    cleaned_questions = clean_chunks(
-            splitted_documents=splitted_documents, 
-            embedding_splitter=embedding_splitter
+    cleaned_questions = Clean.clean_docs(
+            documents=splitted_documents
         )
     
     return cleaned_questions
-
-def merge_docs(documents: DocumentSplitterLangChain) -> DocumentSplitterLangChain:
-    merged_docs = {}
-    for file_name, docs in documents.documents.items():
-        merged_text = "\n".join(doc.page_content for doc in docs)
-        merged_docs[file_name] = [Document(page_content=merged_text)]
-    return DocumentSplitterLangChain(documents=merged_docs)
-
-def document_splitter_tokens(
-    chunk_overlap: int,
-    model_name: str,
-    tokens_per_chunk: int,
-    documents: DocumentSplitterLangChain,
-    subject: str = "AI"
-) -> DocumentSplitterLangChain:
-    documents = documents.documents.copy() # <-- pydant problem - should be a better way of typing
-    documents = remove_extra_sub(documents=documents, subject=subject)
-
-    # merge docs - so that can utilize the full tokenization limit
-    documents = merge_docs(DocumentSplitterLangChain(documents=documents)).documents
-
-    splitter = SentenceTransformersTokenTextSplitter(
-        chunk_overlap=chunk_overlap ,
-        model_name=model_name,
-        tokens_per_chunk=tokens_per_chunk
-    )
-    for file_name, docs in documents.items():
-        try:
-            splitted_docs = splitter.transform_documents(docs)
-        except Exception as e:
-            raise Exception(e)
-        documents[file_name] = splitted_docs
-
-    return DocumentSplitterLangChain(documents=documents)
-
-def clean_docs(
-    documents: DocumentSplitterLangChain
-):
-    documents = documents.documents
-    llm_model_name = "llama3:8b-instruct-q4_0"
-    system_prompt = read_prompts(file_name="clean_question_chunk")
-    for _, docs in documents.items():
-        for doc in docs:
-            text = doc.page_content
-            response: ChatResponse = chat(
-                model=llm_model_name, 
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text},
-            ])
-            print("TEXT\n", text)
-            print("CLEANED QUESTION\n", response["message"]["content"])
-            print("=" * 10)
-        break
-
-def insert_images():
-    ...
